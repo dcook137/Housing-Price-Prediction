@@ -1,0 +1,759 @@
+---
+title: 'Predicting Lancaster City Housing Prices and Rent Status'
+author: Davis Cook, Matt Turetsky, Lynn Zhao
+date: \today
+output:
+  pdf_document:
+    number_sections: true
+bibliography: references.bib
+geometry: margin=0.85in
+fontsize: 12pt
+header-includes:
+- \usepackage{setspace}\onehalfspacing
+---
+
+```{r setup options, include = FALSE}
+knitr::opts_chunk$set(fig.height = 4, fig.width = 5, echo = FALSE, warning = FALSE)
+library(knitr)
+library(tidyverse)
+library(ISLR)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(pROC)
+library(class)
+library(tidyr)
+library(broom)
+library(Metrics)
+library(coefplot)
+library(glmnet)
+```
+
+\tableofcontents
+\listoftables
+\listoffigures
+
+\newpage
+
+# Introduction
+
+The housing market is a fickle thing. Especially since 
+the housing bubble, subsequent market crash of 2008, and constant
+increasing levels of gentrification, buyers and sellers are keen
+to predict the price of real estate in their neighborhood. 
+Lancaster County, in particular Lancaster City, has seen a 
+recent boom in state-wide and national notoriety. The county
+has long been famous for its Plain community that reside in the 
+rural towns of the county. But recent interest has been placed 
+on the City of Lancaster as a growing and culturally important 
+urban center of Pennsylvania. The city has been called by the 
+BBC "America's Refugee Capital" in 2017 [@Strasser_2017];
+The New York Times, in 2019, spotlighted the unique food scene 
+of the city, calling it "a hive of culinary diversity" [@krishna_2019].
+
+This recent surge in the county's recognition begs the question 
+of how this fame will affect the real estate market. This 
+project aims to build a model that predicts the price of 
+property, both commercial and residential, in Lancaster City 
+using data provided by the county. Data was taken from the 
+Lancaster County Property Tax Inquiry website (https://lancasterpa.devnetwedge.com/). The database provides property data of land sales in Lancaster County going 
+back to 1900, although data before 2005 has been seen to be 
+unreliable. Thus, data is pulled from
+All residential land sales from 2005 until 2020. After removing
+outlier properties that sold for less than 
+$10,000---which typically occurs when a house is 
+foreclosed---and greater than $1,000,000, our model uses
+property information from 17,337 locations in Lancaster City. 
+
+
+
+## Predictors
+
+The database offers data related to the qualities of the house,
+such as the price and square footage, and to the features 
+of the owner, such as owner address. Our model uses only
+the intrinsic features of the property to attempt to predict the
+sale price of a house and whether the house is rented or owned.
+The predictors used in our models are displayed
+in Table \ref{features}. 
+
+|Feature|Description|
+|:------|----------:|
+|*LIVING_SQFT*|Total living square footage|
+|*PROPERTY_SQFT*|Total property square footage|
+|*Num_structures*|Number of structures per property|
+|*Num_STORIES*|Number of stories in building|
+|*AGE*|Year house was built|
+|*FIPS_TRACT*[^1]|Classifier of Census Tract Identification|
+|*BASEMENT_AREA*|Total area of Basement|
+|*Full.Baths*|Number of full bathrooms|
+|*Number.of.Rooms*| Number of rooms|
+|*Number.of.Bedrooms*| Number of bedrooms|
+|*Number.of.Families*| Number of families|
+|*sale_year*| Year of sale between 2005 and 2020|
+|*Extra_Fixtures*| Number of added fixtures|
+|*OUTDOOR_AREA*| Total outdoor area of property|
+Table: Summary of predictors used in model \label{features}
+
+[^1]: FIPS stands for Federal Identification Processing Standards. See more on the numerical identification system here.
+
+We also engineered several features for our model. Of note is the "logZscore" of categorical variables roof type, wall material and heating type. Given the many-leveled nature of these variables, we transformed their levels into standard deviations from the mean price of each roof/wall/heating type, averaged over each census tract and each year. Thus, each logZscore variable represents a "score" of how desirable a particular category is. We understand this method may be left with criticism, however, our data is more dirty and raw than most. We see this as an effective way of measuring an otherwise dense variable, and a fun thing to try in a non-published paper.
+
+## Research Questions and Response Variables
+
+We proposed one regression and one classification question
+to answer using the predictors listed above.
+
+1. What is the predicted sale price of a property
+in Lancaster City? 
+2. What is the predicted probability, using intrinsic features
+of the property, that a house is owned or rented?
+
+We add this stipulation to our second question regarding
+rent status because Davis' summer research has shown that
+the Lancaster County Property Tax Inquiry website provides
+the owner's mailing address, so simply comparing the
+mailing address to the property's location gives
+a good indication if the property is owned or rented
+(i.e. if the two addresses are not the same, it is likely
+that the owner does not live in the house; thus, the
+property is likely rented). The responses variables are
+summarized in Table \ref{responses}
+
+|Response|Description|
+|:------|----------:|
+|*price*|Sale price of property|
+|*rented*|Binary class of rent status: owned = 0, rented = 1|
+Table: Summary of response variables \label{responses}
+
+The distribution of sale price can be seen in Figure 
+\ref{fig:price}.
+
+```{r read}
+NA.table <- function(data){
+  #Handling missing values in dataframe
+  table <- sapply(classData, function(x) sum(is.na(x)))
+  return(table / nrow(data))
+}
+
+data = read.csv("featureMatrix_V1.csv")
+
+data[,"sale_year"] <- factor(data[,"sale_year"])
+data[,"FIPS_TRACT"] <- factor(data[,"FIPS_TRACT"])
+
+cleanData <- subset(data, price > 10000 & price < 1000000)
+cleanData = subset(cleanData, select = -1)
+
+#Lists of features for convenient subsetting of dataframes
+allFeat.list <- c("price","BASEMENT_AREA",           
+                "AGE","Extra.Fixtures","Full.Baths",
+                "LIVING_SQFT","NUM_STORIES",
+                "Number.of.Bedrooms",
+                "Number.of.Families","Number.of.Rooms",
+                "OUTDOOR_AREA","PROPERTY_SQFT", 
+                "Land.Use","HEATING_TYPE",
+                "ROOF_TYPE","WALL_TYPE","sale_year")
+
+#all quantitative features
+quantFeat.list <- 
+  c("price","BASEMENT_AREA","AGE",
+    "Extra.Fixtures","Full.Baths","LIVING_SQFT",
+    "NUM_STORIES","Number.of.Bedrooms","Number.of.Families",
+    "Number.of.Rooms","OUTDOOR_AREA","PROPERTY_SQFT", 
+    "sale_year","FIPS_TRACT")
+
+#basic features for model testing
+basicFeat.list <-c("price","BASEMENT_AREA","AGE",
+                   "Extra.Fixtures", "Full.Baths",
+                   "LIVING_SQFT", "NUM_STORIES", 
+                   "Number.of.Bedrooms","Number.of.Families",
+                  "Number.of.Rooms","OUTDOOR_AREA",
+                  "PROPERTY_SQFT", "rented")
+
+quantFeat = cleanData[,quantFeat.list]
+subData = cleanData[, basicFeat.list]
+
+subData <- subset(subData, price > 10000 & price < 1000000)
+```
+
+
+```{r priceDist, fig.height=6,fig.width=7, fig.cap= "\\label{fig:price}Histograms of sale price for Lancaster City homes"}
+par(mfrow = c(1,2))
+hist(cleanData$price, breaks=50,
+     xlab = "Property Sale Price", ylab = "Frequency",
+     main = "Distribution of Sale Price",
+     xlim = c(10000,1000000), ylim = c(0,3000), las = 1,
+     col= "dodgerblue")
+
+hist(log(cleanData$price), breaks=50,
+     main = "Distribution of log Sale Price",
+     xlab = "log of Property Sale Price", ylab = "Frequency",
+     ylim = c(0,1500), xlim = c(9,14),las = 1,
+     col = "dodgerblue")
+
+```
+
+
+The distribution in Figure \ref{fig:price} 
+shows a strongly skewed right distribution, that appears to be a log-normal distribution. Previous studies 
+modeling property values
+have used the logarithm of the price instead, since
+the distribution is more normal. The distribution of 
+$log(price)$ does appear to be approximately normal, 
+as Figure \ref{fig:price} shows.
+
+To get a rough geographical understanding of the rent status
+of homes---which intuitively could be a useful predictor---
+Table \ref{tab:rent} shows the binary distribution of
+owned and rented houses in each census tract.
+
+```{r rentSummary}
+t = table(cleanData$FIPS_TRACT, cleanData$rented)
+t = t[-26,]
+response = cbind(t[,1],t[,2])
+mydata = data.frame(Features = response)
+rownames(mydata) = paste("FIPS ID:",rownames(mydata))
+kable(mydata, col.names = c("Owned","Rented"),caption = "\\label{tab:rent}Summary of rent status in Lancaster City")
+```
+
+# Statistical Models
+
+Modeling continuous and discrete response variables
+require different techniques. Continuous variables,
+such as *price*, are best predicted using 
+regression techniques like linear regression, regression trees, Principal Components Regression (PCR), and LASSO regression.
+
+Discrete variables, typically coded as a binary response, 
+are best modeled using various classification techniques.
+The most common method is using logistic regression, but
+other models include classification trees, Linear Discriminant
+Analysis, and K Nearest Neighbors.
+
+The modeling techniques we used are summarized in the
+following two sections. For regression, we use Best Subset
+Selection and the Lasso. And for classification we use
+a Logistic Model and K-Nearest Neighbors
+
+## Regression Techniques
+
+Our initial data exploration, and intuition, tells us there is be significant multicolinearity between our variables. We expect variables such as sqft and number of bedrooms, or sqft and basement size, to be correlated. We have many such examples of these variables, so our analysis must account for them.
+
+```{r, fig.height = 5, fig.width = 7, fig.cap= "\\label{fig:cormat}Correlation Heatmap"}
+cormat <- round(cor(subData[-c(9,12,13)]),2)
+# removed 'num families', 'rented', 'property_sqft'
+melted_cormat <- melt(cormat)
+
+p = ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + geom_tile()
+p + theme(axis.text.x = element_text(
+          color = "deeppink1", size = 10, angle = 45))
+```
+
+
+In Figure \ref{fig:cormat}, we see that many of our variables have significant correlations with each other, but not particular one has a noticeably strong correlation with our response variable. Ideally, we would like to use Principal Components Regression to tease out these sources of variation, but the presence of important categorical variables in our model means that PCR is not a valid model. Thus, we continue with one subset selection model and one shrinkage model.
+
+**Forward Selection.** This technique produces a multiple
+linear regression model of the form 
+
+\[ Y=\hat{\beta}_0+\hat{\beta}_1 X_1+\cdots\hat{\beta}_p X_p+\epsilon\]
+
+where $Y$ is the response variables, $X_1\dots X_p$ are the
+predictors, $\hat{\beta}_0\dots\hat{\beta}_p$ are the 
+corresponding estimated
+coefficients for each predictor $X_i$, and $\epsilon$
+is the mean zero random error term. The algorithm for Forward Selection is as follows:
+
+1. Let $M_0$ be the null model which contains no predictors.
+2. For $k=1,2,\dots,p-1$, where $p$ is the total number of
+predictors, consider all $p-k$ models that augment the predictors in $M_k$ with one more predictor. Pick the best 
+model and call it $M_p$.
+3. Choose the best model among the $p-k$ models via RSS or 
+$R^2$ and call it $M_{k+1}$
+4. Select the best model among $M_0\dots M_p$
+via cross validation error, adjusted-$R^2$, or some other
+error estimation to compare models.
+
+
+```{r}
+tempData = read.csv("374lassoFeatures.csv")
+tempData <- subset(tempData, select = -c(X))
+
+tempData <- tempData[!is.na(tempData$FIPS_TRACT),]
+tempData <- tempData[!is.na(tempData$logZscoreROOF),]
+tempData <- tempData[!is.na(tempData$logZscoreWALL),]
+tempData <- tempData[!is.na(tempData$logZscoreHEAT),]
+
+tempData[,"FIPS_TRACT"] <- as.factor(tempData[,"FIPS_TRACT"])
+tempData[,"logPrice"] <- log(tempData$price)
+tempData <- subset(tempData, select = -c(price))
+
+set.seed(2)
+tr = sample((1:nrow(tempData)), 0.7*nrow(tempData))
+
+xTrain = tempData[tr,]
+regTest = tempData[-tr,]
+```
+
+```{r, results="hide", warning=FALSE, message=FALSE}
+library(leaps)
+
+regfit.full <- regsubsets(logPrice ~ ., data=xTrain, nvmax=20, method="forward")
+
+#coef(regfit.full, 10)
+fReg.sum = summary(regfit.full)
+```
+
+
+We are testing the null hypothesis that \[\beta_1 = \beta_2 = ... \beta_p = 0\] against the alternative hypothesis that some \[\beta_i \neq 0.\] The relevant test statistics and p-values are available in Table \ref{tab:LRcoef}.
+
+```{r}
+linReg.CoefTable <- lm(logPrice ~ FIPS_TRACT + sale_year + AGE + Full.Baths + LIVING_SQFT  + LIVING_SQFT_sqrt  + logZscoreROOF + logZscoreWALL + ABOVE_GROUND_AREA, data=xTrain) %>%
+  tidy() %>%
+  kable(
+    caption = "\\label{tab:LRcoef}Coefficient-Level Estimates for a Model Fitted to Estimate Housing Prices.",
+    col.names = c("Predictor", "B", "SE", "t", "p"),
+    digits = c(0, 2, 3, 2, 3),
+    label = 
+  )
+
+linReg.CoefTable
+```
+
+A full visualization of error metrics and number of variables can be found in the appendix.
+
+While adjusted-$R^2$continues to rise as the number of 
+predictors increases and
+Cp and BIC decrease, the change is marginal, around 10 for 
+adjusted $R^2$ and Cp. So for interpretability, the highest
+complexity model is not chosen.
+
+
+```{r}
+trainReg.control <- trainControl(method = "cv", number = 10)
+linRegModel <- train(logPrice ~ FIPS_TRACT + sale_year + AGE + Full.Baths + 
+                 LIVING_SQFT  + LIVING_SQFT_sqrt  + logZscoreROOF + 
+                 logZscoreWALL + ABOVE_GROUND_AREA, 
+               data = xTrain, method = "lm",trControl = trainReg.control)
+
+linReg.Trainpreds = predict(linRegModel, xTrain)
+linReg.Testpreds = predict(linRegModel, regTest)
+
+errorTable <- data.frame(
+  postResample(linReg.Trainpreds, xTrain$logPrice),
+  postResample(linReg.Testpreds, regTest$logPrice))
+
+colnames(errorTable) <- c("Train","Test")
+```
+
+We reject the null hypothesis and find multiple statistically significant predictors of housing price. Notably, some but not all census tracts have a significant effect on logPrice. Besides sale year, the rest of the significant variables are related to the physical characteristics of the house. 
+
+Our error metrics are shown in Table \ref{tab:LinReg}. 
+With a fairly low $R^2$ value in both the train and test
+sets, our model does not capture much of the variability in
+the data.
+
+```{r}
+simpleLinReg.ErrorTable <- kable(errorTable, caption = "\\label{tab:LinReg}Multiple Linear Regression Error Metrics")
+
+simpleLinReg.ErrorTable
+```
+
+
+
+**The lasso.** This technique also yields a linear model
+of the form seen in multiple linear regression, except lasso
+attempts to reduce the complexity of the model by performing
+variables selection to eliminate some predictors (setting
+their coefficients equal to 0). It does this by adding a
+penalty term to the typical minimizing RSS formula. Thus,
+lasso minimizes the quantity
+\[ RSS +\lambda\sum_{j=1}^p\mid\beta_j\mid.\]
+The tuning parameter, $\lambda$ is chosen by the modeler,
+but finding the best $\lambda$ is done via cross validation. In
+this way, lasso and best subset are similar in that
+they perform variables selection and attempt to shrink
+the space of predictors used in the model.
+
+
+In comparison to the multiple linear regression with forward subset selection, we present an $\ell_1$-penalized linear regression. We hope the shrinkage of this lasso regression will help identify the parameters for our best model.
+
+```{r,results="hide"}
+grid=10^seq(10,-2,length=100)
+x <- model.matrix(logPrice~., data=xTrain)
+
+y <- xTrain$logPrice
+
+lasso.mod <- glmnet(x, y, alpha=1, lambda=grid)
+cv.out <- cv.glmnet(x, y, alpha=1, type.measure = "mse")
+```
+
+
+
+
+
+```{r}
+#print(summary(cv.out))
+
+lambda_min <- cv.out$lambda.min
+#cv.out$lambda.lse
+lambda_1se <- cv.out$lambda.1se
+
+mat = coef(cv.out, s=lambda_1se)
+sum = summary(mat)
+
+lassoLinReg.table <- data.frame(Variable  = rownames(mat)[sum$i], Coefficient = sum$x)
+#APPENDIX
+lassoLinReg.CoefTable <- kable(lassoLinReg.table, caption = "\\label{tab:LLRC}Lasso Regression Coefficient Values")
+lassoLinReg.CoefTable
+```
+
+As we see in Table \ref{tab:LLRE}, $R^2$ is slightly
+higher than in our forward selection in Table \ref{tab:LinReg}, so the lasso
+is a marginal improvement. However, for analysis sake, both models perform very similarly - their MAE, Rsquared and RMSE are about the same, except the Lasso regression appears to have a slightly larger Rsquared 
+
+```{r}
+xTestMod <- model.matrix(logPrice~., data = regTest)
+yTest <- regTest$logPrice
+
+#xTestMod
+
+lasso.predTest = predict(lasso.mod, s = lambda_min, newx = xTestMod)
+lasso.predTrain  = predict(lasso.mod, s = lambda_min, newx = x)
+
+
+errorTable <- data.frame(
+  postResample(lasso.predTrain, xTrain$logPrice),
+  postResample(lasso.predTest, regTest$logPrice))
+
+colnames(errorTable) <- c("Train","Test")
+
+lassoLinReg.ErrorTable <- kable(errorTable, caption = "\\label{tab:LLRE}Lasso Regression Coefficient Values")
+lassoLinReg.ErrorTable
+```
+
+Residual plots are available in Figure \ref{fig:lassoResid}, and indicate relatively normal errors, supporting the assumptions of our model. 
+
+## Classification
+
+**Logistic Regression.** For binary responses (0 or 1),
+logistic regression calculates the probability 
+\[ P(X)=\frac{e^{\beta_0+\beta_1X_1+\cdots\beta_pX_p}}{1+e^{\beta_0+\beta_1X_1+\cdots\beta_pX_p}}\]
+whose $\beta$'s are calculated using the Maximum Likelihood
+function. The classification 0 or 1 is determined by the
+output probability $P(X)$, with a typical cutoff at 
+$P(X)=0.5$. The logistic model is linear in X, which can
+be seen after some manipulation of the above equation. The
+log-odds form of the equation is
+\[ \log\left(\frac{p(x)}{1-p(x)}\right)=\beta_0+\beta_1X_1+\cdots+\beta_pX_p.\]
+
+This formulation allows for easy interpretation of the model.
+For example, increasing $X_1$ by one unit changes the log-odds
+by $\beta_1$, with all else constant. Distribution of some
+continuous variables given rent status can be found in the
+Appendix. Table \ref{tab:rent} suggests that the census tract
+could be a significant predictor for rent status of a property.
+We will encode rented classification as $1=rented$ and 
+.$0=owned$.
+
+
+```{r}
+classData = read.csv("374classificationFeatures.csv")
+classData = subset(classData, select = -1)
+classData <- classData[!is.na(classData$FIPS_TRACT),]
+
+classData <- classData[!is.na(classData$logZscoreROOF),]
+classData <- classData[!is.na(classData$logZscoreWALL),]
+classData <- classData[!is.na(classData$logZscoreHEAT),]
+
+#table(classData$FIPS_TRACT)
+#sum(is.na(classData$FIPS_TRACT))
+
+classData[,"FIPS_TRACT"] <- as.factor(classData[,"FIPS_TRACT"])
+classData[,"rented"] <- as.factor(classData[,"rented"])
+
+set.seed(1)
+tr = sample((1:nrow(classData)), 0.7*nrow(classData))
+
+train = classData[tr,]
+test = classData[-tr,]
+```
+
+
+
+**K-Nearest Neighbors (KNN).** The KNN classifier algorithm is
+applied to each test observation $x_0$. For each $x_0$ the KNN
+classifier identifies the $k$ nearest training observations,
+$N_0$. It then computes the condition probability for each
+class $j$ as a fraction of the points whose response is $j$:
+\[ P(Y=j\mid X=x_0) = \frac{1}{K}\sum_{i\in N_0}I(y_i=j)\]
+The classification for $x_0$ is chosen by the highest
+probability. When $k$ is small, it will be likely that
+overfitting is occurring because the model is overly flexible,
+while the opposite is true for KNN when $k$ is large, since
+the model is near linear for large values of $k$.
+
+
+## Hypothesis Testing
+
+When applicable, we can do hypothesis testing to find
+the statistical significance of each predictor. For Best Subset
+and Logistic Regression  we tested the significance of each
+$\beta_i$ with the test:
+\[ H_0: \beta_i=0 ~~~ H_a:\beta_i\neq 0.\]
+
+Nevertheless, no hypothesis testing was performed for KNN since no coefficients $\beta_i$ were obtained. As for lasso regression, its hypothesis testing had always been a challenge. Although mathematicians had successfully developed a model named *covariance test statistic* which was suitable linear lasso hypothesis testing and requires only weak assumptions on the predictor *matrix X*, it yet to be a complete model and still requires further improvement[@lockhart2014significance]. Hence, this study did not perform hypothesis testing for linear lasso model or logistic lasso model.
+
+
+
+
+# Results
+
+## Logistic Regression Results
+
+```{r logModel}
+# define training control
+train_control <- trainControl(method = "cv", number = 10)
+
+# train the model on training set
+model <- train(rented ~ FIPS_TRACT,
+               data = train,
+               trControl = train_control,
+               method = "glm",
+               family=binomial())
+
+# summary(model)
+
+#use predictions to get metrics...
+model.preds = predict(model, test)
+
+# TODO :: GET MORE PROFESSIONAL TABLE HERE... SHOULD BE EASY LOOK FOR FUNCTION ONLINE
+cm = confusionMatrix(model.preds, test$rented)
+# mean(model.preds == test$rented)
+
+t = as.matrix(cm)
+response = cbind(t[,1],t[,2])
+mydata = data.frame(Features = response)
+rownames(mydata) = c("Predicted Owned", "Predicted Rented")
+kable(mydata, col.names = c("Owned","Rented"),caption = "\\label{tab:logitFIPS}Summary of FIPS Logistic Regression results")
+```
+
+```{r logreg2}
+train_control <- trainControl(method = "cv", number = 10)
+
+
+# train the model on training set
+model <- train(rented ~ AGE,
+               data = train,
+               trControl = train_control,
+               method = "glm",
+               family=binomial())
+
+# summary(model)
+
+#use predictions to get metrics...
+logReg2.probs = predict(model, test, type="prob")
+logReg2.preds = predict(model, test)
+
+# TODO :: GET MORE PROFESSIONAL TABLE HERE... SHOULD BE EASY LOOK FOR FUNCTION ONLINE
+cm = confusionMatrix(logReg2.preds, test$rented)
+# mean(logReg2.preds == test$rented)
+
+t = as.matrix(cm)
+response = cbind(t[,1],t[,2])
+mydata = data.frame(Features = response)
+rownames(mydata) = c("Predicted Owned", "Predicted Rented")
+kable(mydata, col.names = c("Owned","Rented"),caption = "\\label{tab:logitAGE}Summary of AGE Logistic Regression results")
+```
+
+Two logistic regression models were fitted individually with FIPS_TRACT and AGE as predictors for classifying housing rental status. Each model was trained with 70% of the data (classData) and validated with the remaining 30%. Both logistic models showed high false positive rates meaning that neither model is suitable when a property is owned (see Table \ref{tab:logitFIPS} and Table \ref{tab:logitAGE}). In fact,
+for the logistic model just using age as a predictor,
+the model never predicts a property as owned, as seen in
+Table \ref{tab:logitAGE}.
+
+Nevertheless,
+($\beta_{AGE} \approx -0.0083$) was a significant predictor 
+for rental status 
+with p < 0.05, increasing AGE by one year changes the log 
+odds by approximately
+-0.0083. 
+
+The model using just the FIPS_TRACT predictor
+rental status gave slightly better results. The significant
+census tracts are shown in Table \ref{sigFIPS}. All $\beta$'s had
+corresponding $p<0.001$. We can see from Table \ref{tab:logitFIPS}
+that the model predicted some owned properties
+correctly, but still, performance is poor as the confusion
+matrix shows. However, some census tracts were statistically
+significant ($p<0.05$). 
+The results are summarized in Table \ref{sigFIPS}.
+
+|FIPS_TRACT|$\beta$ value|
+|:------|----------:|
+|FIPS_TRACT200|$\beta = -0.5918$|
+|FIPS_TRACT300|$\beta = -0.8587$|
+|FIPS_TRACT400|$\beta = -0.5952$|
+|FIPS_TRACT500|$\beta = -0.6139$|
+|FIPS_TRACT900|$\beta = -0.7198$|
+|FIPS_TRACT1000|$\beta = -0.9122$|
+|FIPS_TRACT1100|$\beta = -2.0874$|
+|FIPS_TRACT1200|$\beta = -1.8403$|
+|FIPS_TRACT1400|$\beta = -1.1661$|
+|FIPS_TRACT11805|$\beta = -1.5364$|
+|FIPS_TRACT13202|$\beta = -2.7460$|
+|FIPS_TRACT13301|$\beta = -1.4428$|
+|FIPS_TRACT13501|$\beta = -3.5513$|
+|FIPS_TRACT13503|$\beta = -2.5704$|
+|FIPS_TRACT14700|$\beta = -1.0543$|
+Table: Summary of significant census tracts coefficients \label{sigFIPS}
+ 
+Overall, increasing either age or FIPS_TRACT will result in decreasing the probability of a house being classified as rented, but the effect is nt strong given that some 
+$\beta$'s are very close to 0.
+
+## KNN Results
+
+```{r knn, message=FALSE, warning=FALSE}
+set.seed(1)
+
+trControl <- trainControl(method = "cv", number = 10)
+
+train[,"rented"] <- as.factor(train[,"rented"])
+
+fit <- train(rented ~ FIPS_TRACT + OUTDOOR_AREA + Number.of.Bedrooms,
+             method= "knn", 
+             tuneGrid = expand.grid(k=1:10), 
+             trControl = trControl, 
+             metric = "Accuracy", data=train)
+#use predictions to get metrics...
+KNN.probs = predict(model, test, type="prob")
+KNN.preds = predict(model, test)
+
+cm = confusionMatrix(KNN.preds, test$rented)
+KNN.avg = mean(KNN.preds == test$rented)
+
+t = as.matrix(cm)
+response = cbind(t[,1],t[,2])
+mydata = data.frame(Features = response)
+rownames(mydata) = c("Predicted Owned", "Predicted Rented")
+kable(mydata, col.names = c("Owned","Rented"),caption = "\\label{tab:knnMatrix}Summary of KNN test results")
+```
+
+```{r knnRate,message=FALSE, warning=FALSE, fig.cap= "\\label{fig:knnRate}Sensitivity and specificity of KNN classifier"}
+#str(logLasso.probs)
+#str(KNN.probs[,"0"])
+#logReg2.probs
+roc_rose <- plot(roc(test$rented, KNN.probs[,"0"]), 
+                 print.auc = TRUE, col = "blue")
+roc_rose <- plot(roc(test$rented, logReg2.probs[,"0"]), print.auc = TRUE, 
+                 col = "green", print.auc.y = .4, add = TRUE)
+```
+
+
+A KNN model was fitted to predict the classification of
+rent status with three predictors: FIPS_TRACT, OUTDOOR_AREA,
+and Number.of.Bedrooms. The model was trained with 70% of the
+data and validated with test data from the remaining 30%
+of the data. The validation results for KNN with $k=10$ are
+shown in Table \ref{tab:knnMatrix}. This model
+has an accuracy rate of `r round(KNN.avg,4)`, which is slightly higher than the ratio of rented properties 
+to total properties(approximately 0.7461). 
+Along with the high false positive rate, this K Nearest 
+Neighbor model is not good at predicting when a property is 
+owned. One can see from Figure \ref{fig:knnRate} that 
+the curve indicates our model does slightly better 
+than no class separation whatsoever. That is, the AUC, area 
+under the curve, is greater than 0.5 but not very large, which 
+reflects the model's ability to accurately predict some, but 
+not most, false negatives.
+
+Because the K Nearest Neighbor does not allow for estimation,
+we are unable to discern which predictors most impacted the
+model's performance. Obviously demographic predictors
+like race, ethnicity, age, marital status are related
+to rent status as census data consistently shows (@census),
+but our model did not use such predictors.
+Our results from K Nearest Neighbor classification that
+ predictors that are intrinsic to the property 
+ itself---physical features---
+are not adequate for accurately predicting whether the property
+is rented or owned.
+
+# Conclusion
+
+Our results on the classification question---can one predict with sufficient accuracy the rent status of a home in Lancaster City using intrinsic characteristics of the house---do not show strong support in the affirmative. One of our statistical models was unable to accurately assign a house as owned, and the other model only did slightly better. That model still incorrectly assigned the property the status of rented even though in reality it is owned at a high rate. If a researcher or investor is interested in predicting the rent status of an individual property or a collection of properties in a neighborhood, it is advisable that they use other predictors than the ones used in our models, such as the age of the home, the number of beds, and the square footage. Instead, characteristics about the land owner or resident, following prior research, would most likely yield better results for Lancaster City.
+
+
+
+
+# Appendix
+
+```{r, fig.cap= "\\label{fig:lassoResid}Error Plot of Lasso Regression"}
+#Plotting residuals
+plot(lasso.predTest, (lasso.predTest - yTest), xlab="Predictions", ylab="Residuals")
+```
+
+```{r, fig.cap= "\\label{fig:subsetEM}Forward Subset Error for Number of Parameters"}
+#fig.cap= "\\label{fig:subsetEM}Forward Subset Error for Number of Parameters"
+par(mfrow=c(2,2))
+plot(fReg.sum$rss,xlab="Number of Variables",ylab="RSS",
+  type="l")
+plot(fReg.sum$adjr2,xlab="Number of Variables",
+  ylab="Adjusted RSq",type="l")
+
+#which.max(fReg.sum$adjr2)
+points(11,fReg.sum$adjr2[11], col="red",cex=2,pch=20)
+
+plot(fReg.sum$cp,xlab="Number of Variables",ylab="Cp", type="l")
+#which.min(fReg.sum$cp)
+
+points(10,fReg.sum$cp[10],col="red",cex=2,pch=20)
+#which.min(fReg.sum$bic)
+
+plot(fReg.sum$bic,xlab="Number of Variables",ylab="BIC",type="l")
+points(6,fReg.sum$bic[6],col="red",cex=2,pch=20)
+```
+
+
+```{r, fig.cap= "\\label{fig:LinLassoCplot}Linear Regression Lasso Coefficients"}
+#BOTH OF THESE GO TO APPENDIX
+plot(lasso.mod)
+```
+
+```{r, fig.cap= "\\label{fig:LinLassoLplot}Linear Regression Lasso MSE"}
+plot(cv.out)
+```
+
+```{r, fig.height=3,fig.width=4,fig.cap= "\\label{fig:catplots}Catagorical variable plots"}
+
+# par(mfrow=c(2,2))
+boxplot(log(classData$price) ~ classData$rented, col="violet", 
+        main="Distribution of Price given rent status",
+        xlab="Rent status", ylab="Price", cex.main = 0.9)
+boxplot(classData$Number.of.Bedrooms ~ classData$rented, 
+        col="violet", 
+        main="Distribution of Beds given rent status",
+        xlab="Rent status", ylab="Num beds", cex.main = 0.9) 
+boxplot(classData$LIVING_SQFT ~ classData$rented, 
+        col="violet", 
+        main="Distribution of Living Sqft given rent status",
+        xlab="Rent status", ylab="Living SQFT", 
+        ylim = c(0,10000), cex.main = 0.9)
+boxplot(classData$AGE ~ classData$rented, 
+        col="violet", 
+        main="Distribution of AGE given rent status",
+        cex.main = 0.9,
+        xlab="Rent status", ylab="Age")
+```
+
+```{r, fig.height=3,fig.width=4, fig.cap= "\\label{fig:cat}Price vs ownership status"}
+plot(log(cleanData$price) ~ cleanData$rented, 
+        main="Distribution of Price given rent status",
+        xlab="Rent status", ylab="Price") 
+
+```
+\newpage
+
+# References
+
+<!---Here are the references!--->
+<div id="refs"></div>
